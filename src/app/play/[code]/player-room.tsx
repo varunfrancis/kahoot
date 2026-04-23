@@ -4,20 +4,12 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/browser";
 import { loadPlayerSession, type PlayerSession } from "@/lib/session";
-import type {
-  CurrentQuestion,
-  GameRoom,
-  Player,
-  SubmitAnswerResult,
-} from "@/lib/supabase/types";
+import type { CurrentQuestion, GameRoom, Player } from "@/lib/supabase/types";
 import { Card } from "@/components/ui/card";
 import { PlayerLobby } from "./player-lobby";
 import { PlayerAnswer } from "./player-answer";
 import { PlayerLocked } from "./player-locked";
-import { PlayerBetween } from "./player-between";
 import { Leaderboard } from "@/components/leaderboard";
-
-type LastResult = SubmitAnswerResult & { questionId: string };
 
 export function PlayerRoom({ code }: { code: string }) {
   const router = useRouter();
@@ -26,9 +18,9 @@ export function PlayerRoom({ code }: { code: string }) {
   const [room, setRoom] = useState<GameRoom | null>(null);
   const [players, setPlayers] = useState<Player[]>([]);
   const [currentQuestion, setCurrentQuestion] = useState<CurrentQuestion | null>(null);
-  const [lastResult, setLastResult] = useState<LastResult | null>(null);
+  const [submittedQuestionId, setSubmittedQuestionId] = useState<string | null>(null);
   const [answeredIds, setAnsweredIds] = useState<Set<string>>(() => new Set());
-  const [tick, setTick] = useState(0);
+  const [, setTick] = useState(0);
   const answersCount = answeredIds.size;
 
   useEffect(() => {
@@ -69,8 +61,6 @@ export function PlayerRoom({ code }: { code: string }) {
       )
       .subscribe((status) => {
         if (status !== "SUBSCRIBED" || !active) return;
-        // Initial fetches AFTER subscription is live so we can't miss events
-        // that fire between fetch and subscribe.
         supabase
           .from("game_rooms")
           .select("*")
@@ -86,7 +76,6 @@ export function PlayerRoom({ code }: { code: string }) {
           .order("joined_at", { ascending: true })
           .then(({ data }) => {
             if (!active || !data) return;
-            // Merge fetched rows with any INSERTs received before fetch resolved.
             setPlayers((prev) => {
               const byId = new Map(prev.map((p) => [p.id, p]));
               for (const row of data as Player[]) byId.set(row.id, row);
@@ -103,7 +92,7 @@ export function PlayerRoom({ code }: { code: string }) {
     };
   }, [supabase, session, code]);
 
-  // Load current question when room state changes
+  // Load current question whenever the host moves forward
   useEffect(() => {
     if (!room) return;
     if (room.status !== "active") {
@@ -113,13 +102,13 @@ export function PlayerRoom({ code }: { code: string }) {
     supabase
       .rpc("get_current_question", { p_code: code })
       .then(({ data }) => setCurrentQuestion((data ?? null) as CurrentQuestion | null));
-    setLastResult(null);
     setAnsweredIds(new Set());
-  }, [supabase, code, room?.status, room?.current_question_index, room]);
+  }, [supabase, code, room?.status, room?.current_question_index]);
 
-  // Subscribe to answer count for the current question (drives reveal phase)
+  // Count answers for the current question (drives "all answered" for UI)
   const questionId =
     currentQuestion && currentQuestion.status === "active" ? currentQuestion.id : null;
+
   useEffect(() => {
     if (!questionId) return;
     let active = true;
@@ -159,73 +148,30 @@ export function PlayerRoom({ code }: { code: string }) {
     };
   }, [supabase, questionId]);
 
-  // Tick to re-evaluate timer-based reveal
+  // Tick so timer-derived UI re-renders
   useEffect(() => {
     if (!questionId) return;
     const id = setInterval(() => setTick((t) => t + 1), 500);
     return () => clearInterval(id);
   }, [questionId]);
 
-  // On entering a new question, load the player's existing answer (if any) so
-  // that reconnects / refreshes restore the locked-in / revealed state.
+  // On entering a new question, check if I already have an answer on file
+  // (covers reconnects / refreshes).
   useEffect(() => {
     if (!questionId || !session) return;
     let cancelled = false;
     supabase
       .from("answers")
-      .select("is_correct, points_awarded, time_taken_ms, question_id")
+      .select("id")
       .eq("player_id", session.playerId)
       .eq("question_id", questionId)
       .maybeSingle()
       .then(({ data }) => {
         if (cancelled || !data) return;
-        setLastResult({
-          questionId: data.question_id,
-          is_correct: data.is_correct,
-          points_awarded: data.points_awarded,
-          time_taken_ms: data.time_taken_ms,
-        });
+        setSubmittedQuestionId(questionId);
       });
     return () => {
       cancelled = true;
-    };
-  }, [supabase, questionId, session]);
-
-  // Subscribe to UPDATE on this player's answer row for the current question;
-  // the host's finalize_question RPC sets is_correct + points_awarded once the
-  // question closes. We reflect the final numbers in lastResult when it fires.
-  useEffect(() => {
-    if (!questionId || !session) return;
-    const channel = supabase
-      .channel(`answer-final-${questionId}-${session.playerId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "answers",
-          filter: `question_id=eq.${questionId}`,
-        },
-        (payload) => {
-          const row = payload.new as {
-            player_id: string;
-            question_id: string;
-            is_correct: boolean;
-            points_awarded: number;
-            time_taken_ms: number;
-          };
-          if (row.player_id !== session.playerId) return;
-          setLastResult({
-            questionId: row.question_id,
-            is_correct: row.is_correct,
-            points_awarded: row.points_awarded,
-            time_taken_ms: row.time_taken_ms,
-          });
-        },
-      )
-      .subscribe();
-    return () => {
-      supabase.removeChannel(channel);
     };
   }, [supabase, questionId, session]);
 
@@ -245,17 +191,13 @@ export function PlayerRoom({ code }: { code: string }) {
   }
 
   const me = players.find((p) => p.id === session.playerId);
-
   const activeQuestion = currentQuestion?.status === "active" ? currentQuestion : null;
-  const submitted = !!(lastResult && activeQuestion && lastResult.questionId === activeQuestion.id);
+  const submitted = submittedQuestionId === activeQuestion?.id;
   const timeUp =
     activeQuestion && activeQuestion.started_at
       ? Date.now() - new Date(activeQuestion.started_at).getTime() >=
         activeQuestion.time_limit_seconds * 1000
       : false;
-  const allAnswered = players.length > 0 && answersCount >= players.length;
-  const revealPhase = activeQuestion && (timeUp || allAnswered);
-  void tick;
 
   return (
     <div className="min-h-screen p-6 max-w-md mx-auto">
@@ -273,17 +215,9 @@ export function PlayerRoom({ code }: { code: string }) {
       {room.status === "lobby" && <PlayerLobby players={players} />}
 
       {room.status === "active" && activeQuestion && (
-        revealPhase ? (
-          <PlayerBetween
-            result={lastResult ?? { is_correct: false, points_awarded: 0, time_taken_ms: 0 }}
-            submitted={submitted}
-            players={players}
-            highlightPlayerId={session.playerId}
-            startedAt={activeQuestion.started_at}
-            timeLimitSeconds={activeQuestion.time_limit_seconds}
-          />
-        ) : submitted ? (
+        submitted || timeUp ? (
           <PlayerLocked
+            variant={submitted ? "submitted" : "timeout"}
             startedAt={activeQuestion.started_at}
             timeLimitSeconds={activeQuestion.time_limit_seconds}
             answered={answersCount}
@@ -293,7 +227,7 @@ export function PlayerRoom({ code }: { code: string }) {
           <PlayerAnswer
             session={session}
             question={activeQuestion}
-            onSubmitted={setLastResult}
+            onSubmitted={() => setSubmittedQuestionId(activeQuestion.id)}
           />
         )
       )}

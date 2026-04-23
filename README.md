@@ -15,10 +15,10 @@ server-side.
 
 ### 1. Supabase project
 1. Create a new project at https://supabase.com/.
-2. Open **SQL Editor**, paste `supabase/migrations/0001_init.sql`, run it.
-   Then paste `supabase/migrations/0002_aayushi_rule.sql` and run that too.
-   Together these set up schema, RLS, RPCs, and realtime publications, plus
-   the Aayushi-reference scoring rule.
+2. Open **SQL Editor**, paste and run each migration in order:
+   - `supabase/migrations/0001_init.sql` — schema, RLS, RPCs, realtime.
+   - `supabase/migrations/0002_aayushi_rule.sql` — Aayushi-as-reference rule.
+   - `supabase/migrations/0003_finalize_on_end.sql` — score only at game end.
 3. Open **Authentication → Users** and create a host account (email + password).
    There is no self-serve signup flow.
 4. Open **Project Settings → API** and copy the project URL and anon key.
@@ -60,9 +60,23 @@ room (or didn't answer a given question), nobody scores that question.
 | Type answer | up to 1000, speed-weighted; normalized equality with Aayushi's text, fuzzy Levenshtein if the question's fuzzy flag is on |
 | Word cloud | up to 1000, speed-weighted, for any non-empty submission (no Aayushi dependency) |
 
-Scoring is **deferred**: `submit_answer` only records the response.
-`finalize_question` runs at reveal time, reads Aayushi's answer, and writes
-points atomically via the `question_finalizations` idempotency table.
+Scoring is **deferred to game end**: `submit_answer` only records the
+response. When the host advances past the last question, `advance_question`
+flips the room to `finished` and loops through every question, calling
+`finalize_question` (idempotent via the `question_finalizations` table) to
+compute points in a single transaction. Scores stay at 0 during the game
+and populate once the final screen appears.
+
+## Per-question flow
+
+- Everyone sees the question at the same time, with a per-question timer.
+- A player who submits early sees "Answer locked in" and waits.
+- A player whose timer expires before submitting sees "Time's up" and
+  waits — no late submissions.
+- The host's **Next question** button is disabled until everyone has
+  answered or the timer runs out.
+- No scores or reveals are shown mid-game. The final leaderboard appears
+  after the host clicks "Show final results".
 
 ## Project layout
 - `src/app/` — App Router pages
