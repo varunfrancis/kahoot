@@ -15,8 +15,10 @@ server-side.
 
 ### 1. Supabase project
 1. Create a new project at https://supabase.com/.
-2. Open **SQL Editor**, paste the contents of `supabase/migrations/0001_init.sql`,
-   and run it. This sets up schema, RLS, RPCs, and realtime publications.
+2. Open **SQL Editor**, paste `supabase/migrations/0001_init.sql`, run it.
+   Then paste `supabase/migrations/0002_aayushi_rule.sql` and run that too.
+   Together these set up schema, RLS, RPCs, and realtime publications, plus
+   the Aayushi-reference scoring rule.
 3. Open **Authentication → Users** and create a host account (email + password).
    There is no self-serve signup flow.
 4. Open **Project Settings → API** and copy the project URL and anon key.
@@ -43,17 +45,24 @@ Visit http://localhost:3000.
 - Between questions the host sees the correct answer + top 5; each player sees
   their own result + leaderboard rank.
 
-## Question types
+## Question types & scoring (Aayushi rule)
+
+A player with nickname `aayushi` (case-insensitive) is the reference. For
+each question, other players score by matching *her* submission — not the
+`correct_answer` configured in the quiz builder. If Aayushi isn't in the
+room (or didn't answer a given question), nobody scores that question.
+
 | Type | Scoring |
 |---|---|
-| Multiple choice | up to 1000, speed-weighted |
-| True / False | up to 1000, speed-weighted |
-| Ranking (drag 4 into order) | 250 × correctly-placed × speed multiplier |
-| Type answer | up to 1000 if exact or fuzzy match |
-| Word cloud | flat 200 per submission |
+| Multiple choice | up to 1000, speed-weighted, if `index` matches Aayushi's |
+| True / False | up to 1000, speed-weighted, if `value` matches Aayushi's |
+| Ranking | up to 1000, speed-weighted, only if the full 4-item order matches Aayushi's exactly |
+| Type answer | up to 1000, speed-weighted; normalized equality with Aayushi's text, fuzzy Levenshtein if the question's fuzzy flag is on |
+| Word cloud | up to 1000, speed-weighted, for any non-empty submission (no Aayushi dependency) |
 
-All scoring runs in the `submit_answer` Postgres RPC — the client never decides
-points.
+Scoring is **deferred**: `submit_answer` only records the response.
+`finalize_question` runs at reveal time, reads Aayushi's answer, and writes
+points atomically via the `question_finalizations` idempotency table.
 
 ## Project layout
 - `src/app/` — App Router pages

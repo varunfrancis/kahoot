@@ -140,6 +140,69 @@ export function PlayerRoom({ code }: { code: string }) {
     return () => clearInterval(id);
   }, [questionId]);
 
+  // On entering a new question, load the player's existing answer (if any) so
+  // that reconnects / refreshes restore the locked-in / revealed state.
+  useEffect(() => {
+    if (!questionId || !session) return;
+    let cancelled = false;
+    supabase
+      .from("answers")
+      .select("is_correct, points_awarded, time_taken_ms, question_id")
+      .eq("player_id", session.playerId)
+      .eq("question_id", questionId)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (cancelled || !data) return;
+        setLastResult({
+          questionId: data.question_id,
+          is_correct: data.is_correct,
+          points_awarded: data.points_awarded,
+          time_taken_ms: data.time_taken_ms,
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [supabase, questionId, session]);
+
+  // Subscribe to UPDATE on this player's answer row for the current question;
+  // the host's finalize_question RPC sets is_correct + points_awarded once the
+  // question closes. We reflect the final numbers in lastResult when it fires.
+  useEffect(() => {
+    if (!questionId || !session) return;
+    const channel = supabase
+      .channel(`answer-final-${questionId}-${session.playerId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "answers",
+          filter: `question_id=eq.${questionId}`,
+        },
+        (payload) => {
+          const row = payload.new as {
+            player_id: string;
+            question_id: string;
+            is_correct: boolean;
+            points_awarded: number;
+            time_taken_ms: number;
+          };
+          if (row.player_id !== session.playerId) return;
+          setLastResult({
+            questionId: row.question_id,
+            is_correct: row.is_correct,
+            points_awarded: row.points_awarded,
+            time_taken_ms: row.time_taken_ms,
+          });
+        },
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [supabase, questionId, session]);
+
   if (!session) {
     return (
       <div className="min-h-screen flex items-center justify-center p-6">

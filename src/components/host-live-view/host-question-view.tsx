@@ -82,6 +82,28 @@ export function HostQuestionView({
     }
   }, [allAnswered, timeUp, showReveal]);
 
+  // When we enter reveal, finalize scoring against Aayushi's submission, then
+  // refetch answers so the reveal panel and leaderboard reflect the updates.
+  useEffect(() => {
+    if (!showReveal) return;
+    let cancelled = false;
+    (async () => {
+      await supabase.rpc("finalize_question", {
+        p_room_id: room.id,
+        p_question_id: question.id,
+      });
+      if (cancelled) return;
+      const { data } = await supabase
+        .from("answers")
+        .select("*")
+        .eq("question_id", question.id);
+      if (!cancelled && data) setAnswers(data as Answer[]);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [showReveal, supabase, room.id, question.id]);
+
   if (showReveal) {
     return (
       <div className="space-y-6">
