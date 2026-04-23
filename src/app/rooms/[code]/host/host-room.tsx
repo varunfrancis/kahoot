@@ -37,15 +37,10 @@ export function HostRoom({
     };
   }, [supabase, room.id]);
 
-  // Load + subscribe to players
+  // Load + subscribe to players (subscribe first, then fetch, so we never miss
+  // a join event between the initial fetch and realtime going live).
   useEffect(() => {
-    supabase
-      .from("players")
-      .select("*")
-      .eq("room_id", room.id)
-      .order("joined_at", { ascending: true })
-      .then(({ data }) => setPlayers((data ?? []) as Player[]));
-
+    let active = true;
     const channel = supabase
       .channel(`room-${room.id}-players-host`)
       .on(
@@ -53,7 +48,8 @@ export function HostRoom({
         { event: "*", schema: "public", table: "players", filter: `room_id=eq.${room.id}` },
         (payload) => {
           if (payload.eventType === "INSERT") {
-            setPlayers((prev) => [...prev, payload.new as Player]);
+            const row = payload.new as Player;
+            setPlayers((prev) => (prev.some((p) => p.id === row.id) ? prev : [...prev, row]));
           } else if (payload.eventType === "UPDATE") {
             setPlayers((prev) =>
               prev.map((p) => (p.id === (payload.new as Player).id ? (payload.new as Player) : p)),
@@ -63,8 +59,26 @@ export function HostRoom({
           }
         },
       )
-      .subscribe();
+      .subscribe((status) => {
+        if (status !== "SUBSCRIBED" || !active) return;
+        supabase
+          .from("players")
+          .select("*")
+          .eq("room_id", room.id)
+          .order("joined_at", { ascending: true })
+          .then(({ data }) => {
+            if (!active || !data) return;
+            setPlayers((prev) => {
+              const byId = new Map(prev.map((p) => [p.id, p]));
+              for (const row of data as Player[]) byId.set(row.id, row);
+              return Array.from(byId.values()).sort(
+                (a, b) => +new Date(a.joined_at) - +new Date(b.joined_at),
+              );
+            });
+          });
+      });
     return () => {
+      active = false;
       supabase.removeChannel(channel);
     };
   }, [supabase, room.id]);

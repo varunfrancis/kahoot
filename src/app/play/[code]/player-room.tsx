@@ -27,8 +27,9 @@ export function PlayerRoom({ code }: { code: string }) {
   const [players, setPlayers] = useState<Player[]>([]);
   const [currentQuestion, setCurrentQuestion] = useState<CurrentQuestion | null>(null);
   const [lastResult, setLastResult] = useState<LastResult | null>(null);
-  const [answersCount, setAnswersCount] = useState(0);
+  const [answeredIds, setAnsweredIds] = useState<Set<string>>(() => new Set());
   const [tick, setTick] = useState(0);
+  const answersCount = answeredIds.size;
 
   useEffect(() => {
     const s = loadPlayerSession(code);
@@ -43,24 +44,6 @@ export function PlayerRoom({ code }: { code: string }) {
     if (!session) return;
     let active = true;
 
-    supabase
-      .from("game_rooms")
-      .select("*")
-      .eq("code", code)
-      .single()
-      .then(({ data }) => {
-        if (active && data) setRoom(data as GameRoom);
-      });
-
-    supabase
-      .from("players")
-      .select("*")
-      .eq("room_id", session.roomId)
-      .order("joined_at", { ascending: true })
-      .then(({ data }) => {
-        if (active) setPlayers((data ?? []) as Player[]);
-      });
-
     const channel = supabase
       .channel(`room-${session.roomId}-player-${session.playerId}`)
       .on(
@@ -73,7 +56,8 @@ export function PlayerRoom({ code }: { code: string }) {
         { event: "*", schema: "public", table: "players", filter: `room_id=eq.${session.roomId}` },
         (payload) => {
           if (payload.eventType === "INSERT") {
-            setPlayers((prev) => [...prev, payload.new as Player]);
+            const row = payload.new as Player;
+            setPlayers((prev) => (prev.some((p) => p.id === row.id) ? prev : [...prev, row]));
           } else if (payload.eventType === "UPDATE") {
             setPlayers((prev) =>
               prev.map((p) => (p.id === (payload.new as Player).id ? (payload.new as Player) : p)),
@@ -83,7 +67,35 @@ export function PlayerRoom({ code }: { code: string }) {
           }
         },
       )
-      .subscribe();
+      .subscribe((status) => {
+        if (status !== "SUBSCRIBED" || !active) return;
+        // Initial fetches AFTER subscription is live so we can't miss events
+        // that fire between fetch and subscribe.
+        supabase
+          .from("game_rooms")
+          .select("*")
+          .eq("code", code)
+          .single()
+          .then(({ data }) => {
+            if (active && data) setRoom(data as GameRoom);
+          });
+        supabase
+          .from("players")
+          .select("*")
+          .eq("room_id", session.roomId)
+          .order("joined_at", { ascending: true })
+          .then(({ data }) => {
+            if (!active || !data) return;
+            // Merge fetched rows with any INSERTs received before fetch resolved.
+            setPlayers((prev) => {
+              const byId = new Map(prev.map((p) => [p.id, p]));
+              for (const row of data as Player[]) byId.set(row.id, row);
+              return Array.from(byId.values()).sort(
+                (a, b) => +new Date(a.joined_at) - +new Date(b.joined_at),
+              );
+            });
+          });
+      });
 
     return () => {
       active = false;
@@ -102,7 +114,7 @@ export function PlayerRoom({ code }: { code: string }) {
       .rpc("get_current_question", { p_code: code })
       .then(({ data }) => setCurrentQuestion((data ?? null) as CurrentQuestion | null));
     setLastResult(null);
-    setAnswersCount(0);
+    setAnsweredIds(new Set());
   }, [supabase, code, room?.status, room?.current_question_index, room]);
 
   // Subscribe to answer count for the current question (drives reveal phase)
@@ -111,22 +123,36 @@ export function PlayerRoom({ code }: { code: string }) {
   useEffect(() => {
     if (!questionId) return;
     let active = true;
-    supabase
-      .from("answers")
-      .select("id", { count: "exact", head: true })
-      .eq("question_id", questionId)
-      .then(({ count }) => {
-        if (active && typeof count === "number") setAnswersCount(count);
-      });
-
     const channel = supabase
       .channel(`answers-count-${questionId}`)
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "answers", filter: `question_id=eq.${questionId}` },
-        () => setAnswersCount((n) => n + 1),
+        (payload) => {
+          const id = (payload.new as { id: string }).id;
+          setAnsweredIds((prev) => {
+            if (prev.has(id)) return prev;
+            const next = new Set(prev);
+            next.add(id);
+            return next;
+          });
+        },
       )
-      .subscribe();
+      .subscribe((status) => {
+        if (status !== "SUBSCRIBED" || !active) return;
+        supabase
+          .from("answers")
+          .select("id")
+          .eq("question_id", questionId)
+          .then(({ data }) => {
+            if (!active || !data) return;
+            setAnsweredIds((prev) => {
+              const next = new Set(prev);
+              for (const row of data as { id: string }[]) next.add(row.id);
+              return next;
+            });
+          });
+      });
     return () => {
       active = false;
       supabase.removeChannel(channel);

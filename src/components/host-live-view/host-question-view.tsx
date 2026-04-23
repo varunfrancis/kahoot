@@ -37,17 +37,10 @@ export function HostQuestionView({
     setShowReveal(false);
   }, [question.id]);
 
-  // Load existing answers + subscribe to inserts
+  // Subscribe first, then fetch — avoids missing INSERTs fired between
+  // initial fetch and the subscription becoming live.
   useEffect(() => {
     let active = true;
-    supabase
-      .from("answers")
-      .select("*")
-      .eq("question_id", question.id)
-      .then(({ data }) => {
-        if (active) setAnswers((data ?? []) as Answer[]);
-      });
-
     const channel = supabase
       .channel(`answers-${question.id}`)
       .on(
@@ -59,10 +52,25 @@ export function HostQuestionView({
           filter: `question_id=eq.${question.id}`,
         },
         (payload) => {
-          setAnswers((prev) => [...prev, payload.new as Answer]);
+          const row = payload.new as Answer;
+          setAnswers((prev) => (prev.some((a) => a.id === row.id) ? prev : [...prev, row]));
         },
       )
-      .subscribe();
+      .subscribe((status) => {
+        if (status !== "SUBSCRIBED" || !active) return;
+        supabase
+          .from("answers")
+          .select("*")
+          .eq("question_id", question.id)
+          .then(({ data }) => {
+            if (!active || !data) return;
+            setAnswers((prev) => {
+              const byId = new Map(prev.map((a) => [a.id, a]));
+              for (const row of data as Answer[]) byId.set(row.id, row);
+              return Array.from(byId.values());
+            });
+          });
+      });
     return () => {
       active = false;
       supabase.removeChannel(channel);
