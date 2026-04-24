@@ -80,7 +80,15 @@ export function HostQuestionView({
     return () => clearInterval(id);
   }, []);
 
-  const allAnswered = players.length > 0 && answers.length >= players.length;
+  // answers.question_id is shared across rooms that play the same quiz, so
+  // scope to players currently in this room.
+  const roomPlayerIds = useMemo(() => new Set(players.map((p) => p.id)), [players]);
+  const roomAnswers = useMemo(
+    () => answers.filter((a) => roomPlayerIds.has(a.player_id)),
+    [answers, roomPlayerIds],
+  );
+
+  const allAnswered = players.length > 0 && roomAnswers.length >= players.length;
   const timeUp = room.current_question_started_at
     ? Date.now() - new Date(room.current_question_started_at).getTime() >=
       question.time_limit_seconds * 1000
@@ -98,7 +106,7 @@ export function HostQuestionView({
           {advancing
             ? "..."
             : !canAdvance
-              ? `Waiting (${answers.length}/${players.length})`
+              ? `Waiting (${roomAnswers.length}/${players.length})`
               : isLast
                 ? "Show final results"
                 : "Next question"}
@@ -112,10 +120,10 @@ export function HostQuestionView({
           startedAt={room.current_question_started_at}
           timeLimitSeconds={question.time_limit_seconds}
         />
-        <AnsweredCounter answered={answers.length} total={players.length} />
+        <AnsweredCounter answered={roomAnswers.length} total={players.length} />
       </div>
-      {question.question_type === "word_cloud" && <LiveWordCloud answers={answers} />}
-      {question.question_type === "type_answer" && <TypeAnswerTally answers={answers} />}
+      {question.question_type === "word_cloud" && <LiveWordCloud answers={roomAnswers} />}
+      {question.question_type === "type_answer" && <TypeAnswerTally answers={roomAnswers} />}
       {(question.question_type === "multiple_choice" ||
         question.question_type === "true_false" ||
         question.question_type === "ranking") && (

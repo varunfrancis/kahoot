@@ -5,7 +5,7 @@ import { createClient } from "@/lib/supabase/browser";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import type { GameRoom, Player, Question, Quiz } from "@/lib/supabase/types";
-import { Leaderboard } from "@/components/leaderboard";
+import { FinalResultsDashboard } from "@/components/final-results-dashboard";
 import { HostQuestionView } from "@/components/host-live-view/host-question-view";
 
 export function HostRoom({
@@ -117,7 +117,12 @@ export function HostRoom({
         />
       )}
       {room.status === "finished" && (
-        <FinalLeaderboard quiz={quiz} players={players} />
+        <FinalResultsDashboard
+          roomId={room.id}
+          quizId={quiz.id}
+          quizTitle={quiz.title}
+          players={players}
+        />
       )}
     </div>
   );
@@ -177,14 +182,3 @@ function Lobby({
   );
 }
 
-function FinalLeaderboard({ quiz, players }: { quiz: Quiz; players: Player[] }) {
-  return (
-    <div className="space-y-6">
-      <div className="text-center">
-        <p className="text-sm text-neutral-500">{quiz.title}</p>
-        <h1 className="text-3xl font-bold mt-2">Final results</h1>
-      </div>
-      <Leaderboard players={players} showAll />
-    </div>
-  );
-}
