@@ -5,11 +5,10 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/browser";
 import { loadPlayerSession, type PlayerSession } from "@/lib/session";
 import type { CurrentQuestion, GameRoom, Player } from "@/lib/supabase/types";
-import { Card } from "@/components/ui/card";
 import { PlayerLobby } from "./player-lobby";
 import { PlayerAnswer } from "./player-answer";
 import { PlayerLocked } from "./player-locked";
-import { Leaderboard } from "@/components/leaderboard";
+import { FinalResultsDashboard } from "@/components/final-results-dashboard";
 
 export function PlayerRoom({ code }: { code: string }) {
   const router = useRouter();
@@ -18,10 +17,16 @@ export function PlayerRoom({ code }: { code: string }) {
   const [room, setRoom] = useState<GameRoom | null>(null);
   const [players, setPlayers] = useState<Player[]>([]);
   const [currentQuestion, setCurrentQuestion] = useState<CurrentQuestion | null>(null);
+  const [quizTitle, setQuizTitle] = useState<string>("");
   const [submittedQuestionId, setSubmittedQuestionId] = useState<string | null>(null);
-  const [answeredIds, setAnsweredIds] = useState<Set<string>>(() => new Set());
+  const [answeredPlayerIds, setAnsweredPlayerIds] = useState<Set<string>>(() => new Set());
   const [, setTick] = useState(0);
-  const answersCount = answeredIds.size;
+  // Count only players that are currently in this room — answers.question_id
+  // is shared across rooms that play the same quiz, so we filter client-side.
+  const answersCount = useMemo(
+    () => players.reduce((n, p) => n + (answeredPlayerIds.has(p.id) ? 1 : 0), 0),
+    [players, answeredPlayerIds],
+  );
 
   useEffect(() => {
     const s = loadPlayerSession(code);
@@ -92,6 +97,23 @@ export function PlayerRoom({ code }: { code: string }) {
     };
   }, [supabase, session, code]);
 
+  // Load quiz title once we know the quiz_id (for the final results header).
+  useEffect(() => {
+    if (!room?.quiz_id) return;
+    let active = true;
+    supabase
+      .from("quizzes")
+      .select("title")
+      .eq("id", room.quiz_id)
+      .single()
+      .then(({ data }) => {
+        if (active && data) setQuizTitle(data.title as string);
+      });
+    return () => {
+      active = false;
+    };
+  }, [supabase, room?.quiz_id]);
+
   // Load current question whenever the host moves forward
   useEffect(() => {
     if (!room) return;
@@ -102,7 +124,7 @@ export function PlayerRoom({ code }: { code: string }) {
     supabase
       .rpc("get_current_question", { p_code: code })
       .then(({ data }) => setCurrentQuestion((data ?? null) as CurrentQuestion | null));
-    setAnsweredIds(new Set());
+    setAnsweredPlayerIds(new Set());
   }, [supabase, code, room?.status, room?.current_question_index]);
 
   // Count answers for the current question (drives "all answered" for UI)
@@ -118,11 +140,11 @@ export function PlayerRoom({ code }: { code: string }) {
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "answers", filter: `question_id=eq.${questionId}` },
         (payload) => {
-          const id = (payload.new as { id: string }).id;
-          setAnsweredIds((prev) => {
-            if (prev.has(id)) return prev;
+          const pid = (payload.new as { player_id: string }).player_id;
+          setAnsweredPlayerIds((prev) => {
+            if (prev.has(pid)) return prev;
             const next = new Set(prev);
-            next.add(id);
+            next.add(pid);
             return next;
           });
         },
@@ -131,13 +153,13 @@ export function PlayerRoom({ code }: { code: string }) {
         if (status !== "SUBSCRIBED" || !active) return;
         supabase
           .from("answers")
-          .select("id")
+          .select("player_id")
           .eq("question_id", questionId)
           .then(({ data }) => {
             if (!active || !data) return;
-            setAnsweredIds((prev) => {
+            setAnsweredPlayerIds((prev) => {
               const next = new Set(prev);
-              for (const row of data as { id: string }[]) next.add(row.id);
+              for (const row of data as { player_id: string }[]) next.add(row.player_id);
               return next;
             });
           });
@@ -200,7 +222,11 @@ export function PlayerRoom({ code }: { code: string }) {
       : false;
 
   return (
-    <div className="min-h-screen p-6 max-w-md mx-auto">
+    <div
+      className={`min-h-screen p-6 mx-auto ${
+        room.status === "finished" ? "max-w-4xl" : "max-w-md"
+      }`}
+    >
       <header className="mb-6 flex items-center justify-between">
         <div>
           <p className="text-xs uppercase tracking-wide text-neutral-500">You</p>
@@ -233,13 +259,13 @@ export function PlayerRoom({ code }: { code: string }) {
       )}
 
       {room.status === "finished" && (
-        <div className="space-y-4">
-          <Card className="text-center">
-            <h2 className="text-xl font-semibold">Game over</h2>
-            <p className="text-sm text-neutral-500 mt-1">Final score: {me?.score ?? 0}</p>
-          </Card>
-          <Leaderboard players={players} showAll highlightPlayerId={session.playerId} />
-        </div>
+        <FinalResultsDashboard
+          roomId={room.id}
+          quizId={room.quiz_id}
+          quizTitle={quizTitle}
+          players={players}
+          highlightPlayerId={session.playerId}
+        />
       )}
     </div>
   );
